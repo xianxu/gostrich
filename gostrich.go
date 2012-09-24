@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"sync"
 	"math/rand"
-	/*"sort"*/
+	"sort"
 	"net/http"
 	"time"
 )
@@ -66,13 +66,13 @@ type statsRecord struct {
 	statistics  map[string]Sampler
 }
 
-type statsHttpJson struct {
+type statsHttp struct {
 	*statsRecord
+	address     string
 }
 
-type statsHttpTxt struct {
-	*statsRecord
-}
+type statsHttpJson statsHttp
+type statsHttpTxt  statsHttp
 
 func NewSampler(size int) Sampler {
 	return &sampler{0, make([]float64, size)}
@@ -194,8 +194,10 @@ func (sr *statsHttpTxt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func init() {
 	statsSingleton = NewStats(1000)
-	statsJson = &statsHttpJson{ statsSingleton }
-	statsTxt = &statsHttpTxt{ statsSingleton }
+	statsHttpImpl := &statsHttp{ statsSingleton, ":8000" }
+	statsJson = (*statsHttpJson)(statsHttpImpl)
+	statsTxt = (*statsHttpTxt)(statsHttpImpl)
+
     shutdown = make(chan int)
 
 	http.Handle("/stats.json", statsJson)
@@ -204,10 +206,7 @@ func init() {
 		shutdown <- 0
 	})
 
-	//TODO: handle the plain text version
-	//TODO: where do we block and wait?
-	//TODO: the admin interface to shut thing down?
-	go http.ListenAndServe("localhost:8000", nil)
+	go http.ListenAndServe(statsHttpImpl.address, nil)
 }
 
 /*
