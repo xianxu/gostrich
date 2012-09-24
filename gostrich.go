@@ -1,10 +1,7 @@
 package main
 
 /*
- * A file
- * TODO:
- *   - prefer goroutine based over locks? e.g. locks can be avoided if a single goroutine
- *     proxy outside requests to an object.
+ * Ostrich in go, so that we can play go in Twitter's infrastructure.
  */
 import (
 	"fmt"
@@ -14,12 +11,14 @@ import (
 	"sort"
 	"net/http"
 	"time"
+	"math"
+	"encoding/json"
 )
 
 var (
-	statsSingleton *statsRecord
-	statsJson      *statsHttpJson
-	statsTxt       *statsHttpTxt
+	statsSingleton *statsRecord         // singleton stats
+	statsJson      *statsHttpJson       // holder for json admin endpoint
+	statsTxt       *statsHttpTxt        // holder for txt admin endpoint
 	shutdown       chan int             // send any int to shutdown admin server
 )
 
@@ -56,8 +55,14 @@ type Stats interface {
 	Statistics(name string) Sampler
 }
 
+/*
+ * myInt64 will be a Counter.
+ */
 type myInt64 int64
 
+/*
+ * will be a Stats
+ */
 type statsRecord struct {
 	lock        sync.Mutex
 	counters    map[string]*int64
@@ -66,12 +71,23 @@ type statsRecord struct {
 	statistics  map[string]Sampler
 }
 
+/*
+ * Stats that can be served through HTTP
+ */
 type statsHttp struct {
 	*statsRecord
 	address     string
+	//TODO: make stats reporting configurable? E.g. how many p999 to return through HTTP.
 }
 
+/*
+ * Serves Json endpoint.
+ */
 type statsHttpJson statsHttp
+
+/*
+ * Serves Txt endpoint.
+ */
 type statsHttpTxt  statsHttp
 
 func NewSampler(size int) Sampler {
@@ -155,6 +171,100 @@ func (c *myInt64) Get() int64 {
 	return int64(*c)
 }
 
+type sortedValues struct {
+	name  string
+	values []float64
+}
+
+/*
+ * Output a sorted array of float64 as percentile in Json format.
+ */
+func sortedToJson(w http.ResponseWriter, array []float64) {
+	fmt.Fprintf(w, "{")
+	length := len(array)
+	l1 := length - 1
+	if length > 0 {
+		fmt.Fprintf(w, "\"minimum\":%v,",array[0])
+		fmt.Fprintf(w, "\"count\":%v,",length)
+		sum := 0.0
+		for _, v := range array {
+			sum += v
+		}
+		fmt.Fprintf(w, "\"average\":%v,",sum/float64(length))
+		fmt.Fprintf(w, "\"sum\":%v,",sum)
+		fmt.Fprintf(w, "\"p25\":%v,",array[int(math.Min(0.25 * float64(length), float64(l1)))])
+		fmt.Fprintf(w, "\"p50\":%v,",array[int(math.Min(0.50 * float64(length), float64(l1)))])
+		fmt.Fprintf(w, "\"p75\":%v,",array[int(math.Min(0.75 * float64(length), float64(l1)))])
+		fmt.Fprintf(w, "\"p90\":%v,",array[int(math.Min(0.90 * float64(length), float64(l1)))])
+		fmt.Fprintf(w, "\"p99\":%v,",array[int(math.Min(0.99 * float64(length), float64(l1)))])
+		fmt.Fprintf(w, "\"p999\":%v,",array[int(math.Min(0.999 * float64(length), float64(l1)))])
+
+		fmt.Fprintf(w, "\"maximum\":%v",array[l1])
+	}
+	fmt.Fprintf(w, "}")
+}
+
+/*
+ * Output a sorted array of float64 as percentile in text format.
+ */
+func sortedToTxt(w http.ResponseWriter, array []float64) {
+	length := len(array)
+	l1 := length - 1
+	fmt.Fprintf(w, "(")
+	if length > 0 {
+		fmt.Fprintf(w, "minimum=%v, ",array[0])
+		fmt.Fprintf(w, "count=%v, ",length)
+		sum := 0.0
+		for _, v := range array {
+			sum += v
+		}
+		fmt.Fprintf(w, "average=%v, ",sum/float64(length))
+		fmt.Fprintf(w, "sum=%v, ",sum)
+		fmt.Fprintf(w, "p25=%v, ",array[int(math.Min(0.25 * float64(length), float64(l1)))])
+		fmt.Fprintf(w, "p50=%v, ",array[int(math.Min(0.50 * float64(length), float64(l1)))])
+		fmt.Fprintf(w, "p75=%v, ",array[int(math.Min(0.75 * float64(length), float64(l1)))])
+		fmt.Fprintf(w, "p90=%v, ",array[int(math.Min(0.90 * float64(length), float64(l1)))])
+		fmt.Fprintf(w, "p99=%v, ",array[int(math.Min(0.99 * float64(length), float64(l1)))])
+		fmt.Fprintf(w, "p999=%v, ",array[int(math.Min(0.999 * float64(length), float64(l1)))])
+
+		fmt.Fprintf(w, "maximum=%v",array[l1])
+	}
+	fmt.Fprintf(w, ")")
+}
+
+/*
+ * Kicks off sorting of sampled data on collection on multiple CPUs.
+ */
+func (sr *statsRecord) sortOnMultipleCPUs(sorted chan sortedValues) {
+	numItems := len(sr.statistics)
+	if numItems == 0 {
+		close(sorted)
+		return
+	}
+	done := make(chan int)
+	for k, v := range sr.statistics {
+		go func() {
+			sampled := v.Sampled()
+			sort.Float64s(sampled)
+			sorted <- sortedValues{k, sampled}
+			done <- 1
+		} ()
+	}
+	for x := range done {
+		numItems -= x
+		if numItems == 0 {
+			close(sorted)
+		}
+	}
+}
+
+func jsonEncode(v interface{}) string {
+	if b, err := json.Marshal(v); err == nil {
+		return string(b)
+	}
+	return "bad-key"
+}
+
 func (sr *statsHttpJson) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	fmt.Fprintf(w, "{\n")
@@ -165,7 +275,7 @@ func (sr *statsHttpJson) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, ",\n")
 		}
 		first = false
-		fmt.Fprintf(w, "\"%v\": %v", k, *v)
+		fmt.Fprintf(w, "%v: %v", jsonEncode(k), *v)
 	}
 	// gauges
 	for k, f := range sr.gauges {
@@ -173,9 +283,19 @@ func (sr *statsHttpJson) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, ",\n")
 		}
 		first = false
-		fmt.Fprintf(w, "\"%v\": %v", k, f())
+		fmt.Fprintf(w, "%v: %v", jsonEncode(k), f())
 	}
-	//TODO percentile
+	// stats
+	sorted := make(chan sortedValues)
+	go sr.sortOnMultipleCPUs(sorted)
+	for v := range sorted {
+		if !first {
+			fmt.Fprintf(w, ",\n")
+		}
+		first = false
+		fmt.Fprintf(w, "%v: ", jsonEncode(v.name))
+		sortedToJson(w, v.values)
+	}
 	fmt.Fprintf(w, "\n}\n")
 }
 
@@ -183,13 +303,19 @@ func (sr *statsHttpTxt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	// counters
 	for k, v := range sr.counters {
-		fmt.Fprintf(w, "%v %v\n", k, *v)
+		fmt.Fprintf(w, "%v: %v\n", k, *v)
 	}
 	// gauges
 	for k, f := range sr.gauges {
-		fmt.Fprintf(w, "%v %v\n", k, f())
+		fmt.Fprintf(w, "%v: %v\n", k, f())
 	}
-	//TODO percentile
+	// stats
+	sorted := make(chan sortedValues)
+	go sr.sortOnMultipleCPUs(sorted)
+	for v := range sorted {
+		fmt.Fprintf(w, "%v: ", v.name)
+		sortedToTxt(w, v.values)
+	}
 }
 
 func init() {
@@ -216,6 +342,9 @@ func StartToLive() {
 	<-shutdown
 }
 
+/*
+ * Some random test code, not sure where to put them yet.
+ */
 func main() {
 	stats := statsSingleton
 
@@ -234,8 +363,12 @@ func main() {
 	s.Observe(1)
 	s.Observe(2)
 	s.Observe(2)
+	stats.Statistics("tflock").Observe(2)
+	stats.Statistics("tflock").Observe(2)
+	stats.Statistics("tflock").Observe(4)
+	stats.Statistics("tflock").Observe(2)
+	stats.Statistics("tflock").Observe(9)
 	stats.AddGauge("yo", func() float64 { return float64(time.Now().Second()) })
 	fmt.Println(s.Sampled())
-	//time.Sleep(100 * time.Second)
 	StartToLive()
 }
