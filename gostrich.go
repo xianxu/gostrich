@@ -4,15 +4,15 @@ package main
  * Ostrich in go, so that we can play go in Twitter's infrastructure.
  */
 import (
-	"fmt"
-	"sync/atomic"
-	"sync"
-	"math/rand"
-	"sort"
-	"net/http"
-	"time"
-	"math"
 	"encoding/json"
+	"fmt"
+	"math"
+	"math/rand"
+	"net/http"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 var (
