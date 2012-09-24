@@ -16,6 +16,13 @@ import (
 	"time"
 )
 
+var (
+	statsSingleton *statsRecord
+	statsJson      *statsHttpJson
+	statsTxt       *statsHttpTxt
+	shutdown       chan int             // send any int to shutdown admin server
+)
+
 /*
  * Counter represents a thread safe way of keeping track of a single count.
  */
@@ -40,6 +47,33 @@ type sampler struct {
 	cache []float64
 }
 
+/*
+ * The interface used to collect various stats
+ */
+type Stats interface {
+	Counter(name string) Counter
+	AddGauge(name string, gauge func() float64) bool
+	Statistics(name string) Sampler
+}
+
+type myInt64 int64
+
+type statsRecord struct {
+	lock        sync.Mutex
+	counters    map[string]*int64
+	gauges      map[string]func() float64
+	samplerSize int
+	statistics  map[string]Sampler
+}
+
+type statsHttpJson struct {
+	*statsRecord
+}
+
+type statsHttpTxt struct {
+	*statsRecord
+}
+
 func NewSampler(size int) Sampler {
 	return &sampler{0, make([]float64, size)}
 }
@@ -62,25 +96,6 @@ func (s *sampler) Sampled() []float64 {
 		return s.cache[0:s.count]
 	}
 	return s.cache
-}
-
-/*
- * The interface used to collect various stats
- */
-type Stats interface {
-	Counter(name string) Counter
-	AddGauge(name string, gauge func() float64) bool
-	Statistics(name string) Sampler
-}
-
-type myInt64 int64
-
-type statsRecord struct {
-	lock        sync.Mutex
-	counters    map[string]*int64
-	gauges      map[string]func() float64
-	samplerSize int
-	statistics  map[string]Sampler
 }
 
 func NewStats(sampleSize int) *statsRecord {
@@ -140,7 +155,7 @@ func (c *myInt64) Get() int64 {
 	return int64(*c)
 }
 
-func (sr *statsRecord) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (sr *statsHttpJson) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	fmt.Fprintf(w, "{\n")
 	first := true
@@ -160,18 +175,46 @@ func (sr *statsRecord) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		first = false
 		fmt.Fprintf(w, "\"%v\": %v", k, f())
 	}
+	//TODO percentile
 	fmt.Fprintf(w, "\n}\n")
 }
 
-var statsSingleton *statsRecord
+func (sr *statsHttpTxt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	// counters
+	for k, v := range sr.counters {
+		fmt.Fprintf(w, "%v %v\n", k, *v)
+	}
+	// gauges
+	for k, f := range sr.gauges {
+		fmt.Fprintf(w, "%v %v\n", k, f())
+	}
+	//TODO percentile
+}
 
 func init() {
 	statsSingleton = NewStats(1000)
-	http.Handle("/stats.json", statsSingleton)
+	statsJson = &statsHttpJson{ statsSingleton }
+	statsTxt = &statsHttpTxt{ statsSingleton }
+    shutdown = make(chan int)
+
+	http.Handle("/stats.json", statsJson)
+	http.Handle("/stats.txt", statsTxt)
+	http.HandleFunc("/shutdown", func(w http.ResponseWriter, r *http.Request){
+		shutdown <- 0
+	})
+
 	//TODO: handle the plain text version
 	//TODO: where do we block and wait?
 	//TODO: the admin interface to shut thing down?
 	go http.ListenAndServe("localhost:8000", nil)
+}
+
+/*
+ * Blocks current coroutine. Call http /shutdown to shutdown.
+ */
+func StartToLive() {
+	<-shutdown
 }
 
 func main() {
@@ -194,5 +237,6 @@ func main() {
 	s.Observe(2)
 	stats.AddGauge("yo", func() float64 { return float64(time.Now().Second()) })
 	fmt.Println(s.Sampled())
-	time.Sleep(100 * time.Second)
+	//time.Sleep(100 * time.Second)
+	StartToLive()
 }
