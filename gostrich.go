@@ -52,6 +52,7 @@ type sampler struct {
 type Stats interface {
 	Counter(name string) Counter
 	AddGauge(name string, gauge func() float64) bool
+	AddLabel(name string, label func() string) bool
 	Statistics(name string) Sampler
 }
 
@@ -67,6 +68,7 @@ type statsRecord struct {
 	lock        sync.Mutex
 	counters    map[string]*int64
 	gauges      map[string]func() float64
+	labels      map[string]func() string
 	samplerSize int
 	statistics  map[string]Sampler
 }
@@ -119,6 +121,7 @@ func NewStats(sampleSize int) *statsRecord {
 		sync.Mutex{},
 		make(map[string]*int64),
 		make(map[string]func() float64),
+		make(map[string]func() string),
 		sampleSize,
 		make(map[string]Sampler),
 	}
@@ -147,6 +150,18 @@ func (sr *statsRecord) AddGauge(name string, gauge func() float64) bool {
 	defer sr.lock.Unlock()
 
 	sr.gauges[name] = gauge
+	return true
+}
+
+func (sr *statsRecord) AddLabel(name string, label func() string) bool {
+	if _, ok := sr.labels[name]; ok {
+		return false
+	}
+
+	sr.lock.Lock()
+	defer sr.lock.Unlock()
+
+	sr.labels[name] = label
 	return true
 }
 
@@ -285,6 +300,14 @@ func (sr *statsHttpJson) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		first = false
 		fmt.Fprintf(w, "%v: %v", jsonEncode(k), f())
 	}
+	// labels
+	for k, f := range sr.labels {
+		if !first {
+			fmt.Fprintf(w, ",\n")
+		}
+		first = false
+		fmt.Fprintf(w, "%v: %v", jsonEncode(k), jsonEncode(f()))
+	}
 	// stats
 	sorted := make(chan sortedValues)
 	go sr.sortOnMultipleCPUs(sorted)
@@ -307,6 +330,10 @@ func (sr *statsHttpTxt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// gauges
 	for k, f := range sr.gauges {
+		fmt.Fprintf(w, "%v: %v\n", k, f())
+	}
+	// labels
+	for k, f := range sr.labels {
 		fmt.Fprintf(w, "%v: %v\n", k, f())
 	}
 	// stats
@@ -369,6 +396,7 @@ func main() {
 	stats.Statistics("tflock").Observe(2)
 	stats.Statistics("tflock").Observe(9)
 	stats.AddGauge("yo", func() float64 { return float64(time.Now().Second()) })
+	stats.AddLabel("hello", func() string { return "world" })
 	fmt.Println(s.Sampled())
 	StartToLive()
 }
