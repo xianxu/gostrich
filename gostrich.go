@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"math"
-	"math/rand"
 	"net/http"
 	"sort"
 	"sync"
@@ -21,10 +20,12 @@ var (
 	statsJson      *statsHttpJson       // holder for json admin endpoint
 	statsTxt       *statsHttpTxt        // holder for txt admin endpoint
 	shutdown       chan int             // send any int to shutdown admin server
-	started        int32
+	started        int32                // whether the singleton admin service has started
+	initLock       = sync.Mutex{}
+
+	// command line arguments that can be used to customize this module
 	adminPort      = flag.String("admin_port", "8300", "admin port")
 	jsonLineBreak  = flag.Bool("json_line_break", true, "whether break lines for json")
-	initLock       = sync.Mutex{}
 )
 
 /*
@@ -41,8 +42,6 @@ type Counter interface {
 type Sampler interface {
 	Observe(f float64)
 	Sampled() []float64
-	Min()     float64
-	Max()     float64
 }
 
 /*
@@ -111,28 +110,10 @@ func NewSampler(size int) Sampler {
 	return &sampler{0, make([]float64, size), math.MaxFloat64, -1 * math.MaxFloat64}
 }
 
-func (s *sampler) Max() float64 {
-	return s.max
-}
-
-func (s *sampler) Min() float64 {
-	return s.min
-}
-
 func (s *sampler) Observe(f float64) {
-	s.min = math.Min(s.min, f)
-	s.max = math.Max(s.max, f)
-
+	length := len(s.cache)
 	count := atomic.AddInt64(&(s.count), 1)
-	if count <= int64(len(s.cache)) {
-		s.cache[count-1] = f
-	} else {
-		// if we have enough, we select f with probability len/count
-		dice := rand.Int63n(count - 1)
-		if dice < int64(len(s.cache)) {
-			s.cache[dice] = f
-		}
-	}
+	s.cache[int((count - 1) % int64(length))] = f
 }
 
 func (s *sampler) Sampled() []float64 {
@@ -244,14 +225,12 @@ func (c *myInt64) Get() int64 {
 type sortedValues struct {
 	name   string
 	values []float64
-	min    float64
-	max    float64
 }
 
 /*
  * Output a sorted array of float64 as percentile in Json format.
  */
-func sortedToJson(w http.ResponseWriter, array []float64, min float64, max float64) {
+func sortedToJson(w http.ResponseWriter, array []float64) {
 	fmt.Fprintf(w, "{")
 	length := len(array)
 	l1 := length - 1
@@ -263,7 +242,7 @@ func sortedToJson(w http.ResponseWriter, array []float64, min float64, max float
 		}
 		fmt.Fprintf(w, "\"sum\":%v,",sum)
 		fmt.Fprintf(w, "\"average\":%v,",sum/float64(length))
-		fmt.Fprintf(w, "\"minimum\":%v,",min)
+		fmt.Fprintf(w, "\"minimum\":%v,",array[0])
 		fmt.Fprintf(w, "\"p25\":%v,",array[int(math.Min(0.25 * float64(length), float64(l1)))])
 		fmt.Fprintf(w, "\"p50\":%v,",array[int(math.Min(0.50 * float64(length), float64(l1)))])
 		fmt.Fprintf(w, "\"p75\":%v,",array[int(math.Min(0.75 * float64(length), float64(l1)))])
@@ -271,7 +250,7 @@ func sortedToJson(w http.ResponseWriter, array []float64, min float64, max float
 		fmt.Fprintf(w, "\"p99\":%v,",array[int(math.Min(0.99 * float64(length), float64(l1)))])
 		fmt.Fprintf(w, "\"p999\":%v,",array[int(math.Min(0.999 * float64(length), float64(l1)))])
 
-		fmt.Fprintf(w, "\"maximum\":%v",max)
+		fmt.Fprintf(w, "\"maximum\":%v",array[l1])
 	}
 	fmt.Fprintf(w, "}")
 }
@@ -279,7 +258,7 @@ func sortedToJson(w http.ResponseWriter, array []float64, min float64, max float
 /*
  * Output a sorted array of float64 as percentile in text format.
  */
-func sortedToTxt(w http.ResponseWriter, array []float64, min float64, max float64) {
+func sortedToTxt(w http.ResponseWriter, array []float64) {
 	length := len(array)
 	l1 := length - 1
 	fmt.Fprintf(w, "(")
@@ -291,7 +270,7 @@ func sortedToTxt(w http.ResponseWriter, array []float64, min float64, max float6
 		}
 		fmt.Fprintf(w, "sum=%v, ",sum)
 		fmt.Fprintf(w, "average=%v, ",sum/float64(length))
-		fmt.Fprintf(w, "minimum=%v, ",min)
+		fmt.Fprintf(w, "minimum=%v, ",array[0])
 		fmt.Fprintf(w, "p25=%v, ",array[int(math.Min(0.25 * float64(length), float64(l1)))])
 		fmt.Fprintf(w, "p50=%v, ",array[int(math.Min(0.50 * float64(length), float64(l1)))])
 		fmt.Fprintf(w, "p75=%v, ",array[int(math.Min(0.75 * float64(length), float64(l1)))])
@@ -299,7 +278,7 @@ func sortedToTxt(w http.ResponseWriter, array []float64, min float64, max float6
 		fmt.Fprintf(w, "p99=%v, ",array[int(math.Min(0.99 * float64(length), float64(l1)))])
 		fmt.Fprintf(w, "p999=%v, ",array[int(math.Min(0.999 * float64(length), float64(l1)))])
 
-		fmt.Fprintf(w, "maximum=%v",max)
+		fmt.Fprintf(w, "maximum=%v",array[l1])
 	}
 	fmt.Fprintf(w, ")")
 }
@@ -318,7 +297,7 @@ func (sr *statsRecord) sortOnMultipleCPUs(sorted chan sortedValues) {
 		go func() {
 			sampled := v.Sampled()
 			sort.Float64s(sampled)
-			sorted <- sortedValues{k, sampled, v.Min(), v.Max()}
+			sorted <- sortedValues{k, sampled}
 			done <- 1
 		} ()
 	}
@@ -380,7 +359,7 @@ func (sr *statsHttpJson) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		first = false
 		fmt.Fprintf(w, "%v: ", jsonEncode(v.name))
-		sortedToJson(w, v.values, v.min, v.max)
+		sortedToJson(w, v.values)
 	}
 	fmt.Fprintf(w, breakLines() + "}" + breakLines())
 }
@@ -404,7 +383,7 @@ func (sr *statsHttpTxt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go sr.sortOnMultipleCPUs(sorted)
 	for v := range sorted {
 		fmt.Fprintf(w, "%v: ", v.name)
-		sortedToTxt(w, v.values, v.min, v.max)
+		sortedToTxt(w, v.values)
 	}
 }
 
@@ -457,11 +436,10 @@ func main() {
 	s.Observe(1)
 	s.Observe(2)
 	s.Observe(2)
-	stats.Statistics("tflock").Observe(2)
-	stats.Statistics("tflock").Observe(2)
-	stats.Statistics("tflock").Observe(4)
-	stats.Statistics("tflock").Observe(2)
-	stats.Statistics("tflock").Observe(9)
+	tflock := stats.Statistics("tflock")
+	for i := 1; i < 2000; i += 1 {
+		tflock.Observe(float64(i))
+	}
 	stats.AddGauge("yo", func() float64 { return float64(time.Now().Second()) })
 	stats.AddLabel("hello", func() string { return "world" })
 	fmt.Println(s.Sampled())
