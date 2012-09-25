@@ -1,4 +1,4 @@
-package main
+package gostrich
 
 /*
  * Ostrich in go, so that we can play go in Twitter's infrastructure.
@@ -404,6 +404,7 @@ func init() {
  * Blocks current coroutine. Call http /shutdown to shutdown.
  */
 func StartToLive() {
+	serverError := make(chan error)
 	// only start a single copy
 	if atomic.CompareAndSwapInt32(&started, 0, 1) {
 		statsHttpImpl := &statsHttp{ statsSingleton, ":" + *adminPort }
@@ -418,8 +419,16 @@ func StartToLive() {
 			shutdown <- 0
 		})
 
-		go http.ListenAndServe(statsHttpImpl.address, nil)
-		<-shutdown
+		go func() {
+			serverError <- http.ListenAndServe(statsHttpImpl.address, nil)
+		}()
+
+		select {
+		case er := <-serverError:
+			fmt.Println("Can't start up server, error was: " + er.Error())
+		case <-shutdown:
+			fmt.Println("Shutdown requested")
+		}
 	}
 }
 
