@@ -5,6 +5,7 @@ package main
  */
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"math"
 	"math/rand"
@@ -20,6 +21,10 @@ var (
 	statsJson      *statsHttpJson       // holder for json admin endpoint
 	statsTxt       *statsHttpTxt        // holder for txt admin endpoint
 	shutdown       chan int             // send any int to shutdown admin server
+	started        int32
+	adminPort      = flag.String("admin_port", "8300", "admin port")
+	jsonLineBreak  = flag.Bool("json_line_break", true, "whether break lines for json")
+	initLock       = sync.Mutex{}
 )
 
 /*
@@ -36,6 +41,8 @@ type Counter interface {
 type Sampler interface {
 	Observe(f float64)
 	Sampled() []float64
+	Min()     float64
+	Max()     float64
 }
 
 /*
@@ -44,6 +51,8 @@ type Sampler interface {
 type sampler struct {
 	count int64
 	cache []float64
+	min   float64
+	max   float64
 }
 
 /*
@@ -93,10 +102,21 @@ type statsHttpJson statsHttp
 type statsHttpTxt  statsHttp
 
 func NewSampler(size int) Sampler {
-	return &sampler{0, make([]float64, size)}
+	return &sampler{0, make([]float64, size), math.MaxFloat64, -1 * math.MaxFloat64}
+}
+
+func (s *sampler) Max() float64 {
+	return s.max
+}
+
+func (s *sampler) Min() float64 {
+	return s.min
 }
 
 func (s *sampler) Observe(f float64) {
+	s.min = math.Min(s.min, f)
+	s.max = math.Max(s.max, f)
+
 	count := atomic.AddInt64(&(s.count), 1)
 	if count <= int64(len(s.cache)) {
 		s.cache[count-1] = f
@@ -187,26 +207,28 @@ func (c *myInt64) Get() int64 {
 }
 
 type sortedValues struct {
-	name  string
+	name   string
 	values []float64
+	min    float64
+	max    float64
 }
 
 /*
  * Output a sorted array of float64 as percentile in Json format.
  */
-func sortedToJson(w http.ResponseWriter, array []float64) {
+func sortedToJson(w http.ResponseWriter, array []float64, min float64, max float64) {
 	fmt.Fprintf(w, "{")
 	length := len(array)
 	l1 := length - 1
 	if length > 0 {
-		fmt.Fprintf(w, "\"minimum\":%v,",array[0])
 		fmt.Fprintf(w, "\"count\":%v,",length)
 		sum := 0.0
 		for _, v := range array {
 			sum += v
 		}
-		fmt.Fprintf(w, "\"average\":%v,",sum/float64(length))
 		fmt.Fprintf(w, "\"sum\":%v,",sum)
+		fmt.Fprintf(w, "\"average\":%v,",sum/float64(length))
+		fmt.Fprintf(w, "\"minimum\":%v,",min)
 		fmt.Fprintf(w, "\"p25\":%v,",array[int(math.Min(0.25 * float64(length), float64(l1)))])
 		fmt.Fprintf(w, "\"p50\":%v,",array[int(math.Min(0.50 * float64(length), float64(l1)))])
 		fmt.Fprintf(w, "\"p75\":%v,",array[int(math.Min(0.75 * float64(length), float64(l1)))])
@@ -214,7 +236,7 @@ func sortedToJson(w http.ResponseWriter, array []float64) {
 		fmt.Fprintf(w, "\"p99\":%v,",array[int(math.Min(0.99 * float64(length), float64(l1)))])
 		fmt.Fprintf(w, "\"p999\":%v,",array[int(math.Min(0.999 * float64(length), float64(l1)))])
 
-		fmt.Fprintf(w, "\"maximum\":%v",array[l1])
+		fmt.Fprintf(w, "\"maximum\":%v",max)
 	}
 	fmt.Fprintf(w, "}")
 }
@@ -222,19 +244,19 @@ func sortedToJson(w http.ResponseWriter, array []float64) {
 /*
  * Output a sorted array of float64 as percentile in text format.
  */
-func sortedToTxt(w http.ResponseWriter, array []float64) {
+func sortedToTxt(w http.ResponseWriter, array []float64, min float64, max float64) {
 	length := len(array)
 	l1 := length - 1
 	fmt.Fprintf(w, "(")
 	if length > 0 {
-		fmt.Fprintf(w, "minimum=%v, ",array[0])
 		fmt.Fprintf(w, "count=%v, ",length)
 		sum := 0.0
 		for _, v := range array {
 			sum += v
 		}
-		fmt.Fprintf(w, "average=%v, ",sum/float64(length))
 		fmt.Fprintf(w, "sum=%v, ",sum)
+		fmt.Fprintf(w, "average=%v, ",sum/float64(length))
+		fmt.Fprintf(w, "minimum=%v, ",min)
 		fmt.Fprintf(w, "p25=%v, ",array[int(math.Min(0.25 * float64(length), float64(l1)))])
 		fmt.Fprintf(w, "p50=%v, ",array[int(math.Min(0.50 * float64(length), float64(l1)))])
 		fmt.Fprintf(w, "p75=%v, ",array[int(math.Min(0.75 * float64(length), float64(l1)))])
@@ -242,7 +264,7 @@ func sortedToTxt(w http.ResponseWriter, array []float64) {
 		fmt.Fprintf(w, "p99=%v, ",array[int(math.Min(0.99 * float64(length), float64(l1)))])
 		fmt.Fprintf(w, "p999=%v, ",array[int(math.Min(0.999 * float64(length), float64(l1)))])
 
-		fmt.Fprintf(w, "maximum=%v",array[l1])
+		fmt.Fprintf(w, "maximum=%v",max)
 	}
 	fmt.Fprintf(w, ")")
 }
@@ -261,7 +283,7 @@ func (sr *statsRecord) sortOnMultipleCPUs(sorted chan sortedValues) {
 		go func() {
 			sampled := v.Sampled()
 			sort.Float64s(sampled)
-			sorted <- sortedValues{k, sampled}
+			sorted <- sortedValues{k, sampled, v.Min(), v.Max()}
 			done <- 1
 		} ()
 	}
@@ -277,17 +299,23 @@ func jsonEncode(v interface{}) string {
 	if b, err := json.Marshal(v); err == nil {
 		return string(b)
 	}
-	return "bad-key"
+	return "bad_json_value"
 }
 
+func breakLines() string {
+	if *jsonLineBreak {
+		return "\n"
+	}
+	return ""
+}
 func (sr *statsHttpJson) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	fmt.Fprintf(w, "{\n")
+	fmt.Fprintf(w, "{" + breakLines())
 	first := true
 	// counters
 	for k, v := range sr.counters {
 		if !first {
-			fmt.Fprintf(w, ",\n")
+			fmt.Fprintf(w, "," + breakLines())
 		}
 		first = false
 		fmt.Fprintf(w, "%v: %v", jsonEncode(k), *v)
@@ -295,7 +323,7 @@ func (sr *statsHttpJson) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// gauges
 	for k, f := range sr.gauges {
 		if !first {
-			fmt.Fprintf(w, ",\n")
+			fmt.Fprintf(w, "," + breakLines())
 		}
 		first = false
 		fmt.Fprintf(w, "%v: %v", jsonEncode(k), f())
@@ -303,7 +331,7 @@ func (sr *statsHttpJson) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// labels
 	for k, f := range sr.labels {
 		if !first {
-			fmt.Fprintf(w, ",\n")
+			fmt.Fprintf(w, "," + breakLines())
 		}
 		first = false
 		fmt.Fprintf(w, "%v: %v", jsonEncode(k), jsonEncode(f()))
@@ -313,13 +341,13 @@ func (sr *statsHttpJson) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go sr.sortOnMultipleCPUs(sorted)
 	for v := range sorted {
 		if !first {
-			fmt.Fprintf(w, ",\n")
+			fmt.Fprintf(w, "," + breakLines())
 		}
 		first = false
 		fmt.Fprintf(w, "%v: ", jsonEncode(v.name))
-		sortedToJson(w, v.values)
+		sortedToJson(w, v.values, v.min, v.max)
 	}
-	fmt.Fprintf(w, "\n}\n")
+	fmt.Fprintf(w, breakLines() + "}" + breakLines())
 }
 
 func (sr *statsHttpTxt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -341,38 +369,42 @@ func (sr *statsHttpTxt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go sr.sortOnMultipleCPUs(sorted)
 	for v := range sorted {
 		fmt.Fprintf(w, "%v: ", v.name)
-		sortedToTxt(w, v.values)
+		sortedToTxt(w, v.values, v.min, v.max)
 	}
 }
 
 func init() {
-	statsSingleton = NewStats(1000)
-	statsHttpImpl := &statsHttp{ statsSingleton, ":8000" }
-	statsJson = (*statsHttpJson)(statsHttpImpl)
-	statsTxt = (*statsHttpTxt)(statsHttpImpl)
-
-    shutdown = make(chan int)
-
-	http.Handle("/stats.json", statsJson)
-	http.Handle("/stats.txt", statsTxt)
-	http.HandleFunc("/shutdown", func(w http.ResponseWriter, r *http.Request){
-		shutdown <- 0
-	})
-
-	go http.ListenAndServe(statsHttpImpl.address, nil)
+	statsSingleton = NewStats(1001)
 }
 
 /*
  * Blocks current coroutine. Call http /shutdown to shutdown.
  */
 func StartToLive() {
-	<-shutdown
+	// only start a single copy
+	if atomic.CompareAndSwapInt32(&started, 0, 1) {
+		statsHttpImpl := &statsHttp{ statsSingleton, ":" + *adminPort }
+		statsJson = (*statsHttpJson)(statsHttpImpl)
+		statsTxt = (*statsHttpTxt)(statsHttpImpl)
+
+		shutdown = make(chan int)
+
+		http.Handle("/stats.json", statsJson)
+		http.Handle("/stats.txt", statsTxt)
+		http.HandleFunc("/shutdown", func(w http.ResponseWriter, r *http.Request){
+			shutdown <- 0
+		})
+
+		go http.ListenAndServe(statsHttpImpl.address, nil)
+		<-shutdown
+	}
 }
 
 /*
  * Some random test code, not sure where to put them yet.
  */
 func main() {
+	flag.Parse()
 	stats := statsSingleton
 
 	g1 := float64(0)
