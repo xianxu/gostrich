@@ -63,6 +63,7 @@ type Stats interface {
 	AddGauge(name string, gauge func() float64) bool
 	AddLabel(name string, label func() string) bool
 	Statistics(name string) Sampler
+	Scoped(name string) Stats
 }
 
 /*
@@ -80,6 +81,11 @@ type statsRecord struct {
 	labels      map[string]func() string
 	samplerSize int
 	statistics  map[string]Sampler
+}
+
+type scopedStatsRecord struct {
+	sr          *statsRecord
+	scope       string
 }
 
 /*
@@ -196,6 +202,35 @@ func (sr *statsRecord) Statistics(name string) Sampler {
 	vv := NewSampler(sr.samplerSize)
 	sr.statistics[name] = vv
 	return vv
+}
+
+func (sr *statsRecord) Scoped(name string) Stats {
+	return &scopedStatsRecord {
+		sr,
+		name,
+	}
+}
+
+func (ssr *scopedStatsRecord) Counter(name string) Counter {
+	return ssr.sr.Counter(ssr.scope + "/" + name)
+}
+
+func (ssr *scopedStatsRecord) AddGauge(name string, gauge func() float64) bool {
+	return ssr.sr.AddGauge(ssr.scope + "/" + name, gauge)
+}
+
+func (ssr *scopedStatsRecord) AddLabel(name string, label func() string) bool {
+	return ssr.sr.AddLabel(ssr.scope + "/" + name, label)
+}
+func (ssr *scopedStatsRecord) Statistics(name string) Sampler {
+	return ssr.sr.Statistics(ssr.scope + "/" + name)
+}
+
+func (ssr *scopedStatsRecord) Scoped(name string) Stats {
+	return &scopedStatsRecord {
+		ssr.sr,
+		ssr.scope + "/" + name,
+	}
 }
 
 func (c *myInt64) Incr(by int64) int64 {
@@ -430,5 +465,12 @@ func main() {
 	stats.AddGauge("yo", func() float64 { return float64(time.Now().Second()) })
 	stats.AddLabel("hello", func() string { return "world" })
 	fmt.Println(s.Sampled())
+
+	ms := stats.Scoped("memcache_client")
+	ms.Counter("requests").Incr(1)
+	ms.Counter("requests").Incr(1)
+	ms1 := ms.Scoped("client1")
+	ms1.Counter("requests").Incr(1)
+
 	StartToLive()
 }
