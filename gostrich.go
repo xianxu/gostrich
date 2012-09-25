@@ -435,7 +435,7 @@ func StartToLive() {
 /*
  * Some random test code, not sure where to put them yet.
  */
-func main() {
+func test() {
 	flag.Parse()
 	stats := statsSingleton
 
