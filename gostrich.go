@@ -15,6 +15,9 @@ import (
 	"time"
 )
 
+// expose command line and memory stats. TODO: move over?
+import _ "expvar"
+
 var (
 	statsSingleton *statsRecord         // singleton stats
 	statsJson      *statsHttpJson       // holder for json admin endpoint
@@ -22,6 +25,7 @@ var (
 	shutdown       chan int             // send any int to shutdown admin server
 	started        int32                // whether the singleton admin service has started
 	initLock       = sync.Mutex{}
+	then           = time.Now().Unix()
 
 	// command line arguments that can be used to customize this module
 	adminPort      = flag.String("admin_port", "8300", "admin port")
@@ -389,6 +393,11 @@ func (sr *statsHttpTxt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func init() {
 	statsSingleton = NewStats(1001)
+
+	// some basic stats
+	statsSingleton.AddGauge("uptime", func()float64 {
+		return float64(time.Now().Unix() - then)
+	})
 }
 
 /*
