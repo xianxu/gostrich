@@ -19,11 +19,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"math/rand"
 )
 
 //TODO: add some type of logging support, different logging levels. strange core golang lib doesn't support it.
 //      also add command line arguments to support specifying different logging levels.
-// expose command line and memory stats.
+// 		expose command line and memory stats.
+//TODO: split this file, it's getting big with random util funcs.
 import _ "expvar"
 import _ "net/http/pprof"
 
@@ -712,4 +714,21 @@ func (t *QpsTracker) Record() {
 
 func (t *QpsTracker) Ticks() int32 {
 	return atomic.LoadInt32(&t.c[int((atomic.LoadInt64(&t.active)+int64(1))%2)])
+}
+
+// do something based on chance. If c is greater than 1, this will do the thing potentially
+// multiple times (up sample).
+func DoWithChance(c float32, fn func()) {
+	if c >= 1 {
+		// up sample
+		for i := float32(1); i <= c; i += 1 {
+			fn()
+		}
+	} else {
+		// otherwise throw a dice
+		if rand.Float32() < c {
+			fn()
+		}
+	}
+	return
 }
