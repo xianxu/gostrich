@@ -685,3 +685,31 @@ func (ints Int64Slice) Swap(i, j int) {
 	slice := []int64(ints)
 	slice[i], slice[j] = slice[j], slice[i]
 }
+
+type QpsTracker struct {
+	c [2]int32
+	active int64
+	ticker *time.Ticker
+}
+
+func NewQpsTracker(span time.Duration) *QpsTracker {
+	t := new(QpsTracker)
+	t.ticker = time.NewTicker(span)
+	go func() {
+		for {
+			<-t.ticker.C  // block till next second
+			current := atomic.AddInt64(&t.active, 1)
+			// we might miss a request or two, fine for this purpose.
+			atomic.StoreInt32(&t.c[current%2], 0)
+		}
+	}()
+	return t
+}
+
+func (t *QpsTracker) Record() {
+	atomic.AddInt32(&t.c[int(atomic.LoadInt64(&t.active)%2)], 1)
+}
+
+func (t *QpsTracker) Ticks() int32 {
+	return atomic.LoadInt32(&t.c[int((atomic.LoadInt64(&t.active)+int64(1))%2)])
+}
