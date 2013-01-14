@@ -21,8 +21,9 @@ import (
 	"time"
 )
 
+//TODO: add some type of logging support, different logging levels. strange core golang lib doesn't support it.
+//      also add command line arguments to support specifying different logging levels.
 // expose command line and memory stats.
-// TODO: move those stats over to gostrich so those can be viz-ed?
 import _ "expvar"
 import _ "net/http/pprof"
 
@@ -83,7 +84,9 @@ type IntSampler interface {
 	Observe(f int64)
 	Sampled() []int64
 	Clear()
-	IsFull() bool
+	// how many samples we keep
+	Length()int
+	Count()int64
 }
 
 /*
@@ -213,9 +216,11 @@ func (s *intSampler) Clear() {
 	}
 }
 
-func (s *intSampler) IsFull() bool {
-	n := atomic.LoadInt64(&(s.count))
-	return n >= int64(s.length)
+func (s *intSampler) Length() int {
+	return s.length
+}
+func (s *intSampler) Count() int64 {
+	return s.count
 }
 
 /*
