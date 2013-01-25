@@ -42,12 +42,14 @@ var (
 	// debugging
 	NumCPU     = flag.Int("num_cpu", 1, "Number of cpu to use. Use 0 to use all CPU")
 	CpuProfile = flag.String("cpu_profile", "", "Write cpu profile to file")
+	LogLevel   = flag.Int("log", 1, "Numeric level of logging. (0:dbg, 1:info, 2:warn, 3:err, 4:fatal)")
 
 	StartUpTime = time.Now().Unix() // start up time
 
 	// internal states
 	adminLock = sync.Mutex{}
 	admin     *adminServer // singleton stats, that's "typically" what you need
+	logger    = NamedLogger{"[Gostrich]"}
 )
 
 /*
@@ -592,7 +594,7 @@ func (admin *adminServer) StartToLive(adminPort int, jsonLineBreak bool, registe
 	case er := <-serverError:
 		return AdminError("Can't start up server, error was: " + er.Error())
 	case <-shutdown:
-		log.Println("Shutdown requested")
+		logger.LogInfo("Shutdown requested")
 	}
 
 	if admin.shutdownHook != nil {
@@ -622,7 +624,10 @@ func AdminServer() *adminServer {
 func StartToLive(registers []func(*http.ServeMux)) error {
 	ncpu := *NumCPU
 
-	log.Printf("Admin staring to live, with admin port of %v and debug port of %v with %v CPUs", *AdminPort+*PortOffset, *DebugPort+*PortOffset, ncpu)
+	logger.LogInfoF(func()interface{} {
+		return fmt.Sprintf("Admin staring to live, with admin port of %v and debug port of %v with %v CPUs",
+			*AdminPort+*PortOffset, *DebugPort+*PortOffset, ncpu)
+	})
 
 	if ncpu == 0 {
 		ncpu = runtime.NumCPU()
@@ -630,17 +635,17 @@ func StartToLive(registers []func(*http.ServeMux)) error {
 	runtime.GOMAXPROCS(ncpu)
 
 	if *CpuProfile != "" {
-		log.Println("Enabling profiling")
+		logger.LogInfo("Enabling profiling")
 		f, err := os.Create(*CpuProfile)
 		if err != nil {
-			log.Fatal(err)
+			logger.LogInfo(err) //TODO log fatal
 		}
 		pprof.StartCPUProfile(f)
 	}
 
 	// starts up debugging server
 	go func() {
-		log.Println(http.ListenAndServe(":"+strconv.Itoa(*DebugPort+*PortOffset), nil))
+		logger.LogInfo(fmt.Sprintf("%v", http.ListenAndServe(":"+strconv.Itoa(*DebugPort+*PortOffset), nil)))
 	}()
 	//making sure stats are created.
 	AdminServer()
@@ -648,7 +653,7 @@ func StartToLive(registers []func(*http.ServeMux)) error {
 		if *CpuProfile != "" {
 			pprof.StopCPUProfile()
 		}
-		log.Printf("Shutdown gostrich.")
+		logger.LogInfo("Shutdown gostrich.")
 	}
 	return admin.StartToLive(*AdminPort+*PortOffset, *JsonLineBreak, registers)
 }
@@ -732,3 +737,40 @@ func DoWithChance(c float32, fn func()) {
 	}
 	return
 }
+
+// Logger
+type Logger interface {
+	LogDbg(msg interface{})
+	LogDbgF(msg func()interface{})
+	LogInfo(msg interface{})
+	LogInfoF(msg func()interface{})
+}
+
+type NamedLogger struct {
+	Name string
+}
+
+func (l NamedLogger) LogDbg(msg interface{}) {
+	if *LogLevel <= 0 {
+		log.Printf("%v DBG: %v", l.Name, msg)
+	}
+}
+
+func (l NamedLogger) LogDbgF(msg func()interface{}) {
+	if *LogLevel <= 0 {
+		log.Printf("%v DBG: %v", l.Name, msg())
+	}
+}
+
+func (l NamedLogger) LogInfo(msg interface{}) {
+	if *LogLevel <= 1 {
+		log.Printf("%v INFO: %v", l.Name, msg)
+	}
+}
+
+func (l NamedLogger) LogInfoF(msg func()interface{}) {
+	if *LogLevel <= 1 {
+		log.Printf("%v INFO: %v", l.Name, msg())
+	}
+}
+
