@@ -42,7 +42,7 @@ var (
 	// debugging
 	NumCPU     = flag.Int("num_cpu", 1, "Number of cpu to use. Use 0 to use all CPU")
 	CpuProfile = flag.String("cpu_profile", "", "Write cpu profile to file")
-	LogLevel   = flag.Int("log", 1, "Numeric level of logging. (0:dbg, 1:info, 2:warn, 3:err, 4:fatal)")
+	LogLevel   = flag.Int("log", 1, "Numeric level of logging. (0:dbg, 1:info, 2:warn, 3:err)")
 
 	StartUpTime = time.Now().Unix() // start up time
 
@@ -744,6 +744,10 @@ type Logger interface {
 	LogDbgF(msg func()interface{})
 	LogInfo(msg interface{})
 	LogInfoF(msg func()interface{})
+	LogWarn(msg interface{})
+	LogWarnF(msg func()interface{})
+	LogErr(msg interface{})
+	LogErrF(msg func()interface{})
 }
 
 type NamedLogger struct {
@@ -771,6 +775,30 @@ func (l NamedLogger) LogInfo(msg interface{}) {
 func (l NamedLogger) LogInfoF(msg func()interface{}) {
 	if *LogLevel <= 1 {
 		log.Printf("%v INFO: %v", l.Name, msg())
+	}
+}
+
+func (l NamedLogger) LogWarn(msg interface{}) {
+	if *LogLevel <= 2 {
+		log.Printf("%v WARN: %v", l.Name, msg)
+	}
+}
+
+func (l NamedLogger) LogWarnF(msg func()interface{}) {
+	if *LogLevel <= 2 {
+		log.Printf("%v WARN: %v", l.Name, msg())
+	}
+}
+
+func (l NamedLogger) LogErr(msg interface{}) {
+	if *LogLevel <= 3 {
+		log.Printf("%v ERR: %v", l.Name, msg)
+	}
+}
+
+func (l NamedLogger) LogErrF(msg func()interface{}) {
+	if *LogLevel <= 3 {
+		log.Printf("%v ERR: %v", l.Name, msg())
 	}
 }
 
