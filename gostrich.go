@@ -695,6 +695,7 @@ func (ints Int64Slice) Swap(i, j int) {
 
 type QpsTracker struct {
 	c [2]int32
+	e [2]int32
 	active int64
 	ticker *time.Ticker
 }
@@ -708,17 +709,26 @@ func NewQpsTracker(span time.Duration) *QpsTracker {
 			current := atomic.AddInt64(&t.active, 1)
 			// we might miss a request or two, fine for this purpose.
 			atomic.StoreInt32(&t.c[current%2], 0)
+			atomic.StoreInt32(&t.e[current%2], 0)
 		}
 	}()
 	return t
 }
 
-func (t *QpsTracker) Record() {
+func (t *QpsTracker) Record(err bool) {
 	atomic.AddInt32(&t.c[int(atomic.LoadInt64(&t.active)%2)], 1)
+	if err {
+		atomic.AddInt32(&t.e[int(atomic.LoadInt64(&t.active)%2)], 1)
+	}
 }
 
-func (t *QpsTracker) Ticks() int32 {
-	return atomic.LoadInt32(&t.c[int((atomic.LoadInt64(&t.active)+int64(1))%2)])
+// returns ticks of current and previous seconds
+func (t *QpsTracker) Ticks() (c1, e1, c2, e2 int32) {
+	c1 = atomic.LoadInt32(&t.c[int((atomic.LoadInt64(&t.active)+int64(1))%2)])
+	e1 = atomic.LoadInt32(&t.e[int((atomic.LoadInt64(&t.active)+int64(1))%2)])
+	c2 = atomic.LoadInt32(&t.c[int((atomic.LoadInt64(&t.active))%2)])
+	e2 = atomic.LoadInt32(&t.e[int((atomic.LoadInt64(&t.active))%2)])
+	return
 }
 
 // do something based on chance. If c is greater than 1, this will do the thing potentially

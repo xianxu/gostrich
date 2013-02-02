@@ -11,15 +11,16 @@ func TestQpsTracker(t *testing.T) {
 	go func() {
 		// in the first 40ms, send 1 tick per ms
 		for i := 0; i < 40; i += 1 {
-			tracker.Record()
+			tracker.Record(false)  // all success
 			time.Sleep(time.Millisecond)
 		}
 		// then in the next 40ms, send 4 ticks per ms
 		for i := 0; i < 40; i += 1 {
-			tracker.Record()
-			tracker.Record()
-			tracker.Record()
-			tracker.Record()
+			// 50% error rate
+			tracker.Record(false)
+			tracker.Record(true)
+			tracker.Record(false)
+			tracker.Record(true)
 			time.Sleep(time.Millisecond)
 	    }
 		done <- 1
@@ -28,7 +29,7 @@ func TestQpsTracker(t *testing.T) {
 	time.Sleep(11 * time.Millisecond)
 	// for the next 30ms, qps should be at about 10qps
 	for i := 0; i < 30; i += 1 {
-		qps := tracker.Ticks()
+		qps, _, _, _ := tracker.Ticks()
 		if qps > 20 || qps < 5 {
 			t.Errorf("Well, qps is %v, doesn't seem acurate", qps)
 		} else {
@@ -39,11 +40,16 @@ func TestQpsTracker(t *testing.T) {
 	// wait till qps ramp up to 4 per ms
 	time.Sleep(31 * time.Millisecond)
 	for i := 0; i < 10; i += 1 {
-		qps := tracker.Ticks()
+		qps, eps, _, _ := tracker.Ticks()
 		if qps > 50 || qps <= 15 {
 			t.Errorf("Well, qps is %v, doesn't seem acurate", qps)
 		} else {
 			t.Logf("qps seems ok at: %v\n", qps)
+		}
+		if qps > 2 * eps || eps > 2 * qps {
+			t.Errorf("Well, qps is %v and eps is %v, doesn't seem acurate", qps, eps)
+		} else {
+			t.Logf("ratio of qps and eps seems ok at: %v and %v\n", qps, eps)
 		}
 		time.Sleep(time.Millisecond)
 	}
