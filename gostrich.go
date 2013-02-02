@@ -26,6 +26,7 @@ import (
 //      also add command line arguments to support specifying different logging levels.
 // 		expose command line and memory stats.
 //TODO: split this file, it's getting big with random util funcs.
+//TODO: logging lib seems not good
 import _ "expvar"
 import _ "net/http/pprof"
 
