@@ -6,12 +6,12 @@ import (
 )
 
 func TestQpsTracker(t *testing.T) {
-	tracker := NewQpsTracker(10*time.Millisecond)
+	tracker := NewQpsTracker(10 * time.Millisecond)
 	done := make(chan int)
 	go func() {
 		// in the first 40ms, send 1 tick per ms
 		for i := 0; i < 40; i += 1 {
-			tracker.Record(false)  // all success
+			tracker.Record(false) // all success
 			time.Sleep(time.Millisecond)
 		}
 		// then in the next 40ms, send 4 ticks per ms
@@ -22,9 +22,9 @@ func TestQpsTracker(t *testing.T) {
 			tracker.Record(false)
 			tracker.Record(true)
 			time.Sleep(time.Millisecond)
-	    }
+		}
 		done <- 1
-	} ()
+	}()
 	// wait for 11ms to by pass cold start
 	time.Sleep(11 * time.Millisecond)
 	// for the next 30ms, qps should be at about 10qps
@@ -46,7 +46,7 @@ func TestQpsTracker(t *testing.T) {
 		} else {
 			t.Logf("qps seems ok at: %v\n", qps)
 		}
-		if qps > 2 * eps || eps > 2 * qps {
+		if qps > 2*eps || eps > 2*qps {
 			t.Errorf("Well, qps is %v and eps is %v, doesn't seem acurate", qps, eps)
 		} else {
 			t.Logf("ratio of qps and eps seems ok at: %v and %v\n", qps, eps)
@@ -59,7 +59,7 @@ func TestQpsTracker(t *testing.T) {
 
 func TestDoWithChance(t *testing.T) {
 	var s int64
-	DoWithChance(1, func(){
+	DoWithChance(1, func() {
 		s += 1
 	})
 	if s != 1 {
@@ -67,24 +67,24 @@ func TestDoWithChance(t *testing.T) {
 	}
 
 	s = 0
-	DoWithChance(1.5, func(){
-			s += 1
-		})
+	DoWithChance(1.5, func() {
+		s += 1
+	})
 	if s != 1 {
 		t.Errorf("sum should be 1, but it's not. sum is %v", s)
 	}
 
 	s = 0
-	DoWithChance(2.2, func(){
-			s += 1
-		})
+	DoWithChance(2.2, func() {
+		s += 1
+	})
 	if s != 2 {
 		t.Errorf("sum should be 2, but it's not. sum is %v", s)
 	}
 
 	s = 0
 	for i := 0; i < 10000; i += 1 {
-		DoWithChance(0, func(){
+		DoWithChance(0, func() {
 			s += 1
 		})
 	}
@@ -94,7 +94,7 @@ func TestDoWithChance(t *testing.T) {
 
 	s = 0
 	for i := 0; i < 1000; i += 1 {
-		DoWithChance(0.1, func(){
+		DoWithChance(0.1, func() {
 			s += 1
 		})
 	}

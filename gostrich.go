@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand"
 	"net/http"
 	"os"
 	"runtime"
@@ -19,7 +20,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"math/rand"
 )
 
 //TODO: add some type of logging support, different logging levels. strange core golang lib doesn't support it.
@@ -90,8 +90,8 @@ type IntSampler interface {
 	Sampled() []int64
 	Clear()
 	// how many samples we keep
-	Length()int
-	Count()int64
+	Length() int
+	Count() int64
 }
 
 /*
@@ -625,7 +625,7 @@ func AdminServer() *adminServer {
 func StartToLive(registers []func(*http.ServeMux)) error {
 	ncpu := *NumCPU
 
-	logger.LogInfoF(func()interface{} {
+	logger.LogInfoF(func() interface{} {
 		return fmt.Sprintf("Admin staring to live, with admin port of %v and debug port of %v with %v CPUs",
 			*AdminPort+*PortOffset, *DebugPort+*PortOffset, ncpu)
 	})
@@ -695,8 +695,8 @@ func (ints Int64Slice) Swap(i, j int) {
 }
 
 type QpsTracker struct {
-	c [2]int32
-	e [2]int32
+	c      [2]int32
+	e      [2]int32
 	active int64
 	ticker *time.Ticker
 }
@@ -706,7 +706,7 @@ func NewQpsTracker(span time.Duration) *QpsTracker {
 	t.ticker = time.NewTicker(span)
 	go func() {
 		for {
-			<-t.ticker.C  // block till next second
+			<-t.ticker.C // block till next second
 			current := atomic.AddInt64(&t.active, 1)
 			// we might miss a request or two, fine for this purpose.
 			atomic.StoreInt32(&t.c[current%2], 0)
@@ -752,13 +752,13 @@ func DoWithChance(c float32, fn func()) {
 // Logger
 type Logger interface {
 	LogDbg(msg interface{})
-	LogDbgF(msg func()interface{})
+	LogDbgF(msg func() interface{})
 	LogInfo(msg interface{})
-	LogInfoF(msg func()interface{})
+	LogInfoF(msg func() interface{})
 	LogWarn(msg interface{})
-	LogWarnF(msg func()interface{})
+	LogWarnF(msg func() interface{})
 	LogErr(msg interface{})
-	LogErrF(msg func()interface{})
+	LogErrF(msg func() interface{})
 }
 
 type NamedLogger struct {
@@ -771,7 +771,7 @@ func (l NamedLogger) LogDbg(msg interface{}) {
 	}
 }
 
-func (l NamedLogger) LogDbgF(msg func()interface{}) {
+func (l NamedLogger) LogDbgF(msg func() interface{}) {
 	if *LogLevel <= 0 {
 		log.Printf("%v DBG: %v", l.Name, msg())
 	}
@@ -783,7 +783,7 @@ func (l NamedLogger) LogInfo(msg interface{}) {
 	}
 }
 
-func (l NamedLogger) LogInfoF(msg func()interface{}) {
+func (l NamedLogger) LogInfoF(msg func() interface{}) {
 	if *LogLevel <= 1 {
 		log.Printf("%v INFO: %v", l.Name, msg())
 	}
@@ -795,7 +795,7 @@ func (l NamedLogger) LogWarn(msg interface{}) {
 	}
 }
 
-func (l NamedLogger) LogWarnF(msg func()interface{}) {
+func (l NamedLogger) LogWarnF(msg func() interface{}) {
 	if *LogLevel <= 2 {
 		log.Printf("%v WARN: %v", l.Name, msg())
 	}
@@ -807,9 +807,8 @@ func (l NamedLogger) LogErr(msg interface{}) {
 	}
 }
 
-func (l NamedLogger) LogErrF(msg func()interface{}) {
+func (l NamedLogger) LogErrF(msg func() interface{}) {
 	if *LogLevel <= 3 {
 		log.Printf("%v ERR: %v", l.Name, msg())
 	}
 }
-
