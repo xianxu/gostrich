@@ -3,13 +3,12 @@ package gostrich
 /*
  * Some basics for setting up a service:
  *   - report stats
- *   - NamedLogger, custom location of logger etc.
  */
 import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"github.com/golang/glog"
 	"math"
 	"math/rand"
 	"net/http"
@@ -22,15 +21,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"syscall"
 )
 
 //TODO: docs
-//TODO: add some type of logging support, different logging levels. strange core golang lib doesn't support it.
-//      also add command line arguments to support specifying different logging levels.
-// 		expose command line and memory stats.
 //TODO: split this file, it's getting big with random util funcs.
-//TODO: logging lib seems not good
 import _ "expvar"
 import _ "net/http/pprof"
 
@@ -47,30 +41,17 @@ var (
 	// debugging
 	NumCPU     = flag.Int("num_cpu", 1, "Number of cpu to use. Use 0 to use all CPU")
 	CpuProfile = flag.String("cpu_profile", "", "Write cpu profile to file")
-	LogLevel   = flag.Int("log_level", 1, "Numeric level of logging. (0:dbg, 1:info, 2:warn, 3:err)")
-	LogOutput  = flag.String("log_output", "", "Where to log to, default to stderr")
 
 	StartUpTime = time.Now().Unix() // start up time
 
 	// internal states
 	adminLock = sync.Mutex{}
 	admin     *adminServer // singleton stats, that's "typically" what you need
-	logger    = NamedLogger("[Gostrich]")
-
-	rawLog *log.Logger = nil
 )
 
 /*
- * An Admin provides a start up method and get root of stats collector.
- */
-type Admin interface {
-	StartToLive(registers []func(*http.ServeMux)) error
-	GetStats() Stats
-}
-
-/*
  * The interface used to collect various stats. It provides counters, gauges, labels and stats.
- * It also provides a way to scope Stats collector to a prefixed scope. All implementation should
+ * It also provides a way to scope Stats collector to a prefixed scope. Implementation is
  * be thread safe.
  */
 type Stats interface {
@@ -90,15 +71,27 @@ type Counter interface {
 }
 
 /*
- * Sampler maintains a sample of input stream of numbers.
+ * myInt64 will be a Counter.
+ */
+type myInt64 int64
+
+func (c *myInt64) Incr(by int64) int64 {
+	return atomic.AddInt64((*int64)(c), by)
+}
+
+func (c *myInt64) Get() int64 {
+	return atomic.LoadInt64((*int64)(c))
+}
+
+/*
+ * Sampler maintains a sample of input stream of long values.
  */
 type IntSampler interface {
 	Observe(f int64)
-	Sampled() []int64
+	Sampled() []int64 // list of sampled values
 	Clear()
-	// how many samples we keep
-	Length() int
-	Count() int64
+	Length() int  // how many samples are kept
+	Count() int64 // how many observations are made
 }
 
 /*
@@ -123,11 +116,6 @@ type intSamplerWithClone struct {
 	// cloned cache's used to do stats reporting, where we need to sort the content of cache.
 	clonedCache []int64
 }
-
-/*
- * myInt64 will be a Counter.
- */
-type myInt64 int64
 
 /*
  * will be a Stats
@@ -357,14 +345,6 @@ func (ssr *scopedStatsRecord) Scoped(name string) Stats {
 	}
 }
 
-func (c *myInt64) Incr(by int64) int64 {
-	return atomic.AddInt64((*int64)(c), by)
-}
-
-func (c *myInt64) Get() int64 {
-	return atomic.LoadInt64((*int64)(c))
-}
-
 // represent sorted numbers, with a name
 type sortedValues struct {
 	name   string
@@ -541,24 +521,6 @@ func (sr *statsHttpTxt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func getLogger() *log.Logger {
-	if rawLog == nil {
-		if *LogOutput == "" {
-			rawLog = log.New(os.Stderr, "", log.LstdFlags)
-		} else {
-			flag := syscall.O_CREAT | syscall.O_APPEND | syscall.O_RDWR
-			perm := os.FileMode(0666)
-			var file *os.File
-			file, err := os.OpenFile(*LogOutput, flag, perm)
-			if err != nil {
-				panic(fmt.Sprintf("can't open %s log file", *LogOutput))
-			}
-			rawLog = log.New(file, "", log.LstdFlags)
-		}
-	}
-	return rawLog
-}
-
 type AdminError string
 
 func (e AdminError) Error() string {
@@ -611,8 +573,7 @@ func (admin *adminServer) StartToLive(adminPort int, jsonLineBreak bool, registe
 		nil,
 	}
 
-	log.Println("Base admin server started on", adminPortString)
-	log.Println("Logging to", *LogOutput)
+	glog.Info("Base admin server started on", adminPortString)
 
 	go func() {
 		serverError <- server.ListenAndServe()
@@ -622,7 +583,9 @@ func (admin *adminServer) StartToLive(adminPort int, jsonLineBreak bool, registe
 	case er := <-serverError:
 		return AdminError("Can't start up server, error was: " + er.Error())
 	case <-shutdown:
-		logger.LogInfo("Shutdown requested")
+		if glog.V(0) {
+			glog.Infoln("Shutdown requested")
+		}
 	}
 
 	if admin.shutdownHook != nil {
@@ -632,7 +595,7 @@ func (admin *adminServer) StartToLive(adminPort int, jsonLineBreak bool, registe
 	return nil
 }
 
-func AdminServer() *adminServer {
+func getAdminServer() *adminServer {
 	adminLock.Lock()
 	defer adminLock.Unlock()
 	if admin == nil {
@@ -647,16 +610,20 @@ func AdminServer() *adminServer {
 	return admin
 }
 
+func GetStats() Stats {
+	return getAdminServer().GetStats()
+}
+
 /*
  * Main entry function of gostrich
  */
 func StartToLive(registers []func(*http.ServeMux)) error {
 	ncpu := *NumCPU
 
-	logger.LogInfoF(func() interface{} {
-		return fmt.Sprintf("Admin staring to live, with admin port of %v and debug port of %v with %v CPUs",
+	if glog.V(0) {
+		glog.Infof("Admin staring to live, with admin port of %v and debug port of %v with %v CPUs",
 			*AdminPort+*PortOffset, *DebugPort+*PortOffset, ncpu)
-	})
+	}
 
 	if ncpu == 0 {
 		ncpu = runtime.NumCPU()
@@ -664,25 +631,26 @@ func StartToLive(registers []func(*http.ServeMux)) error {
 	runtime.GOMAXPROCS(ncpu)
 
 	if *CpuProfile != "" {
-		logger.LogInfo("Enabling profiling")
+		glog.Info("Enabling profiling")
 		f, err := os.Create(*CpuProfile)
 		if err != nil {
-			logger.LogInfo(err) //TODO log fatal
+			glog.Error(err)
 		}
 		pprof.StartCPUProfile(f)
 	}
 
 	// starts up debugging server
 	go func() {
-		logger.LogInfo(fmt.Sprintf("%v", http.ListenAndServe(":"+strconv.Itoa(*DebugPort+*PortOffset), nil)))
+		glog.Infof("%v", http.ListenAndServe(":"+strconv.Itoa(*DebugPort+*PortOffset), nil))
 	}()
+
 	//making sure stats are created.
-	AdminServer()
+	getAdminServer()
 	admin.shutdownHook = func() {
 		if *CpuProfile != "" {
 			pprof.StopCPUProfile()
 		}
-		logger.LogInfo("Shutdown gostrich.")
+		glog.Info("Shutdown gostrich")
 	}
 	return admin.StartToLive(*AdminPort+*PortOffset, *JsonLineBreak, registers)
 }
@@ -775,66 +743,4 @@ func DoWithChance(c float32, fn func()) {
 		}
 	}
 	return
-}
-
-// Logger
-type Logger interface {
-	LogDbg(msg interface{})
-	LogDbgF(msg func() interface{})
-	LogInfo(msg interface{})
-	LogInfoF(msg func() interface{})
-	LogWarn(msg interface{})
-	LogWarnF(msg func() interface{})
-	LogErr(msg interface{})
-	LogErrF(msg func() interface{})
-}
-
-type NamedLogger string
-
-func (l NamedLogger) LogDbg(msg interface{}) {
-	if *LogLevel <= 0 {
-		getLogger().Printf("%v DBG: %v", l, msg)
-	}
-}
-
-func (l NamedLogger) LogDbgF(msg func() interface{}) {
-	if *LogLevel <= 0 {
-		getLogger().Printf("%v DBG: %v", l, msg())
-	}
-}
-
-func (l NamedLogger) LogInfo(msg interface{}) {
-	if *LogLevel <= 1 {
-		getLogger().Printf("%v INFO: %v", l, msg)
-	}
-}
-
-func (l NamedLogger) LogInfoF(msg func() interface{}) {
-	if *LogLevel <= 1 {
-		getLogger().Printf("%v INFO: %v", l, msg())
-	}
-}
-
-func (l NamedLogger) LogWarn(msg interface{}) {
-	if *LogLevel <= 2 {
-		getLogger().Printf("%v WARN: %v", l, msg)
-	}
-}
-
-func (l NamedLogger) LogWarnF(msg func() interface{}) {
-	if *LogLevel <= 2 {
-		getLogger().Printf("%v WARN: %v", l, msg())
-	}
-}
-
-func (l NamedLogger) LogErr(msg interface{}) {
-	if *LogLevel <= 3 {
-		getLogger().Printf("%v ERR: %v", l, msg)
-	}
-}
-
-func (l NamedLogger) LogErrF(msg func() interface{}) {
-	if *LogLevel <= 3 {
-		getLogger().Printf("%v ERR: %v", l, msg())
-	}
 }
