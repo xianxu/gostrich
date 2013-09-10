@@ -1,7 +1,9 @@
 package gostrich
 
 /*
- * Ostrich in go, so that we can play go in Twitter's infrastructure.
+ * Some basics for setting up a service:
+ *   - report stats
+ *   - NamedLogger, custom location of logger etc.
  */
 import (
 	"encoding/json"
@@ -20,8 +22,10 @@ import (
 	"sync/atomic"
 	"time"
 	"math/rand"
+	"syscall"
 )
 
+//TODO: docs
 //TODO: add some type of logging support, different logging levels. strange core golang lib doesn't support it.
 //      also add command line arguments to support specifying different logging levels.
 // 		expose command line and memory stats.
@@ -43,14 +47,17 @@ var (
 	// debugging
 	NumCPU     = flag.Int("num_cpu", 1, "Number of cpu to use. Use 0 to use all CPU")
 	CpuProfile = flag.String("cpu_profile", "", "Write cpu profile to file")
-	LogLevel   = flag.Int("log", 1, "Numeric level of logging. (0:dbg, 1:info, 2:warn, 3:err)")
+	LogLevel   = flag.Int("log_level", 1, "Numeric level of logging. (0:dbg, 1:info, 2:warn, 3:err)")
+	LogOutput  = flag.String("log_output", "", "Where to log to, default to stderr")
 
 	StartUpTime = time.Now().Unix() // start up time
 
 	// internal states
 	adminLock = sync.Mutex{}
 	admin     *adminServer // singleton stats, that's "typically" what you need
-	logger    = NamedLogger{"[Gostrich]"}
+	logger    = NamedLogger("[Gostrich]")
+
+	rawLog *log.Logger = nil
 )
 
 /*
@@ -62,8 +69,8 @@ type Admin interface {
 }
 
 /*
- * The interface used to collect various stats. It provides counters, gauges, labels and samples.
- * It also provides a way to scope Stats collector to a prefixed domain. All implementation should
+ * The interface used to collect various stats. It provides counters, gauges, labels and stats.
+ * It also provides a way to scope Stats collector to a prefixed scope. All implementation should
  * be thread safe.
  */
 type Stats interface {
@@ -534,7 +541,22 @@ func (sr *statsHttpTxt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func init() {
+func getLogger() *log.Logger {
+	if rawLog == nil {
+		if *LogOutput == "" {
+			rawLog = log.New(os.Stderr, "", log.LstdFlags)
+		} else {
+			flag := syscall.O_CREAT | syscall.O_APPEND | syscall.O_RDWR
+			perm := os.FileMode(0666)
+			var file *os.File
+			file, err := os.OpenFile(*LogOutput, flag, perm)
+			if err != nil {
+				panic(fmt.Sprintf("can't open %s log file", *LogOutput))
+			}
+			rawLog = log.New(file, "", log.LstdFlags)
+		}
+	}
+	return rawLog
 }
 
 type AdminError string
@@ -556,7 +578,8 @@ func (admin *adminServer) GetStats() Stats {
  */
 func (admin *adminServer) StartToLive(adminPort int, jsonLineBreak bool, registers []func(*http.ServeMux)) error {
 	// only start a single copy
-	statsHttpImpl := &statsHttp{admin.stats, ":" + strconv.Itoa(adminPort)}
+	adminPortString := strconv.Itoa(adminPort)
+	statsHttpImpl := &statsHttp{admin.stats, ":" + adminPortString}
 	statsJson := &statsHttpJson{statsHttpImpl, jsonLineBreak}
 	statsTxt := (*statsHttpTxt)(statsHttpImpl)
 
@@ -583,9 +606,13 @@ func (admin *adminServer) StartToLive(adminPort int, jsonLineBreak bool, registe
 		mux,
 		18 * time.Second,
 		10 * time.Second,
-		0,
+		100,
+		nil,
 		nil,
 	}
+
+	log.Println("Base admin server started on", adminPortString)
+	log.Println("Logging to", *LogOutput)
 
 	go func() {
 		serverError <- server.ListenAndServe()
@@ -601,6 +628,7 @@ func (admin *adminServer) StartToLive(adminPort int, jsonLineBreak bool, registe
 	if admin.shutdownHook != nil {
 		admin.shutdownHook()
 	}
+
 	return nil
 }
 
@@ -761,55 +789,53 @@ type Logger interface {
 	LogErrF(msg func()interface{})
 }
 
-type NamedLogger struct {
-	Name string
-}
+type NamedLogger string
 
 func (l NamedLogger) LogDbg(msg interface{}) {
 	if *LogLevel <= 0 {
-		log.Printf("%v DBG: %v", l.Name, msg)
+		getLogger().Printf("%v DBG: %v", l, msg)
 	}
 }
 
 func (l NamedLogger) LogDbgF(msg func()interface{}) {
 	if *LogLevel <= 0 {
-		log.Printf("%v DBG: %v", l.Name, msg())
+		getLogger().Printf("%v DBG: %v", l, msg())
 	}
 }
 
 func (l NamedLogger) LogInfo(msg interface{}) {
 	if *LogLevel <= 1 {
-		log.Printf("%v INFO: %v", l.Name, msg)
+		getLogger().Printf("%v INFO: %v", l, msg)
 	}
 }
 
 func (l NamedLogger) LogInfoF(msg func()interface{}) {
 	if *LogLevel <= 1 {
-		log.Printf("%v INFO: %v", l.Name, msg())
+		getLogger().Printf("%v INFO: %v", l, msg())
 	}
 }
 
 func (l NamedLogger) LogWarn(msg interface{}) {
 	if *LogLevel <= 2 {
-		log.Printf("%v WARN: %v", l.Name, msg)
+		getLogger().Printf("%v WARN: %v", l, msg)
 	}
 }
 
 func (l NamedLogger) LogWarnF(msg func()interface{}) {
 	if *LogLevel <= 2 {
-		log.Printf("%v WARN: %v", l.Name, msg())
+		getLogger().Printf("%v WARN: %v", l, msg())
 	}
 }
 
 func (l NamedLogger) LogErr(msg interface{}) {
 	if *LogLevel <= 3 {
-		log.Printf("%v ERR: %v", l.Name, msg)
+		getLogger().Printf("%v ERR: %v", l, msg)
 	}
 }
 
 func (l NamedLogger) LogErrF(msg func()interface{}) {
 	if *LogLevel <= 3 {
-		log.Printf("%v ERR: %v", l.Name, msg())
+		getLogger().Printf("%v ERR: %v", l, msg())
 	}
 }
 
